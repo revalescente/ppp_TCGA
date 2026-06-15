@@ -1,0 +1,75 @@
+---
+title: "TCGA-OV analyses"
+author: "Valerio Reffo"
+date: "2026-06-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(purrr)
+library(spatstat)
+library(dplyr)
+library(patchwork)
+```
+
+
+## Analyses only on TCGA-OV samples (91/107 selected samples)
+
+Lcross function obtained from KDE downsampling algorithm: 
+sketching through Kernel Density Estimate
+
+# Reading data
+
+```{r}
+samples_name <- readRDS("~/ppp_TCGA/data/tcgaov_samples_name.rds")
+lfun_path <- "/projects/shared/TCGA_data/results/Lfun_KDE"
+```
+
+```{r}
+Lcross_ov <- map(samples_name, \(sample){
+  data_path <- paste0(lfun_path, "/", sample, ".rds")
+  lsample <- readRDS(data_path)
+  lsample
+})
+names(Lcross_ov) <- samples_name
+```
+
+```{r}
+p1 <- points_plot(ppp_sub) + theme(legend.position = "none")
+p2 <- points_plot(pp_neo) + theme(legend.position = "none")
+
+p1 | p2
+```
+
+
+```{r}
+pcf_ov <- map(Lcross_ov, \(lest){
+  pcf.fv(lest, method = "b")
+})
+```
+
+
+```{r}
+df_pcf <- bind_rows(lapply(pcf_ov, as.data.frame), .id = "sample")
+
+# 2. Plot using ggplot2
+p3 <- ggplot(df_pcf, aes(x = r, y = pcf, color = sample)) +
+  # Dropped alpha to 0.1 so you can actually see the density of 2,000 lines
+  geom_line(alpha = 0.8, linewidth = 0.5) + 
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black", size = 1) +
+  theme_minimal() +
+  guides(color = "none") +
+  labs(title = "Pair Correlation Function (91 Samples)",
+       x = "Distance (r)",
+       y = "PCF")
+
+```
+
+```{r}
+p3 + xlim(c(0, 50))
+```
+
