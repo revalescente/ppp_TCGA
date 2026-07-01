@@ -1,0 +1,321 @@
+---
+title: "Functional Data Analysis and Clustering on L-cross Functions"
+author: "Valerio Reffo"
+date: "`r Sys.Date()`"
+format: html
+params:
+  input_file: "/projects/shared/TCGA_data/results/combined_Lcross_KDE.csv"
+---
+
+## Setup and Libraries
+
+
+```{r}
+#| label: setup
+#| message: false
+#| warning: false
+
+library(data.table)
+library(parallel)
+library(fda)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+```
+
+## Data Loading
+
+We read the combined $L$-cross Kernel Density Estimation (KDE) data from the specified path in the document parameters.
+
+```{r}
+#| label: load-data
+
+message("Reading data from: ", params$input_file)
+dt <- fread(params$input_file)
+message("Successfully loaded data with ", nrow(dt), " rows and ", ncol(dt), " columns.")
+```
+
+## Functional Data Smoothing
+
+We apply the `fsmooth` function to convert the raw data points into a continuous functional data object.
+
+```{r}
+#| label: fun-fsmooth
+
+# safer smoothing wrapper that avoids using every observed r as a knot and
+# provides sensible defaults for nbasis and lambda plus fallbacks on error
+fsmooth <- function(
+  dt,
+  M = 6,                  # spline order (norder)
+  genLfun.fd = 4,         # Lfdobj for fdPar
+  centrata = FALSE,       # center by r before smoothing
+  nbasis = NULL,          # allow user to set number of basis functions
+  breaks = NULL,          # alternative: provide a coarser breaks vector
+  lambda = NULL,          # smoothing penalty; if NULL a default is chosen
+  rangeval = NULL,        # override range(r) if desired
+  verbose = FALSE,
+  ...
+) {
+  # 1. Robustly extract r
+  if ("r_value" %in% names(dt)) {
+    r <- dt$r_value
+  } else {
+    if (verbose) message("Warning: 'r_value' column not found; using first column as r")
+    r <- dt[[1]]
+  }
+
+  # 2. Extract functional matrix (all columns after the first)
+  mat_fun <- as.matrix(dt[, -1, with = FALSE])
+  if (is.null(colnames(mat_fun))) {
+    colnames(mat_fun) <- paste0("S", seq_len(ncol(mat_fun)))
+  }
+
+  # 3. Optional centering
+  if (isTRUE(centrata)) {
+    mat_fun <- sweep(mat_fun, MARGIN = 1, STATS = r, FUN = "-")
+  }
+
+  # 4. Determine range
+  if (is.null(rangeval)) rangeval <- range(r, na.rm = TRUE)
+
+  # 5. Choose nbasis sensibly if not provided
+  n_r <- length(r)
+  if (!is.null(breaks)) {
+    # If the user supplied breaks, follow fda convention
+    nbasis_calc <- length(breaks) + M - 2
+    if (verbose) message("Using user-supplied breaks; nbasis computed as: ", nbasis_calc)
+    genbasis <- create.bspline.basis(rangeval = rangeval, nbasis = nbasis_calc, norder = M, breaks = breaks)
+  } else {
+    if (!is.null(nbasis)) {
+      nbasis_calc <- nbasis
+    } else {
+      # default heuristic: up to 30 bases but not larger than roughly n_r/4
+      nbasis_calc <- min(30, max(M + 1, floor(n_r / 4)))
+    }
+    if (nbasis_calc >= n_r) {
+      if (verbose) message("nbasis (", nbasis_calc, ") >= number of observations (", n_r, "); reducing nbasis to avoid overparameterization")
+      nbasis_calc <- max(M + 1, n_r - 1)
+    }
+    genbasis <- create.bspline.basis(rangeval = rangeval, nbasis = nbasis_calc, norder = M)
+  }
+
+  # 6. Choose lambda if not provided (avoid near-interpolation)
+  if (is.null(lambda)) {
+    # A conservative default that provides some smoothing; users may increase
+    # but avoid values like 1e-11 which effectively disable penalization
+    lambda_val <- 1e-6
+  } else {
+    lambda_val <- lambda
+  }
+
+  genfdPar <- fdPar(genbasis, genLfun.fd, lambda = lambda_val)
+
+  # 7. Try smoothing with fallback strategies on error
+  genfdSmooth <- tryCatch(
+    smooth.basis(argvals = r, y = mat_fun, fdParobj = genfdPar, ...),
+    error = function(e) {
+      if (verbose) message("smooth.basis failed: ", conditionMessage(e), "; retrying with larger lambda and Lfdobj=2")
+      # fallback: increase penalty and use Lfdobj=2
+      tryCatch(
+        {
+          genfdPar2 <- fdPar(genbasis, Lfdobj = 2, lambda = max(lambda_val, 1e-4))
+          smooth.basis(argvals = r, y = mat_fun, fdParobj = genfdPar2, ...)
+        },
+        error = function(e2) {
+          stop("Both primary and fallback smoothing attempts failed: ", conditionMessage(e2))
+        }
+      )
+    }
+  )
+
+  Genfun.fd <- genfdSmooth$fd
+
+  # 8. Set names defensively
+  fdn_dist <- paste("Distanza (da 0 a", max(r, na.rm = TRUE), "micron)")
+  fdnames <- list(fdn_dist,
+                  "Sample" = colnames(mat_fun),
+                  "Funzione")
+  Genfun.fd$fdnames <- fdnames
+
+  # 9. Basic sanity checks
+  if (!is.null(Genfun.fd$coefs)) {
+    n_coefs <- ncol(Genfun.fd$coefs)
+    if (ncol(mat_fun) != n_coefs) {
+      if (verbose) message("Warning: number of functions in mat_fun (", ncol(mat_fun), ") != number of fd coefficient columns (", n_coefs, ")")
+    } else {
+      if (verbose) message("Finished smoothing: nbasis=", genbasis$nbasis, ", lambda=", lambda_val)
+    }
+  } else {
+    if (verbose) message("Finished smoothing but fd$coefs is NULL")
+  }
+
+  return(list(fd = Genfun.fd, fdPar = genfdPar, basis = genbasis, mat = mat_fun, r = r))
+}
+```
+
+
+```{r}
+#| label: fda-smoothing
+
+message("Applying fsmooth function...")
+smoothed_Lfun <- fsmooth(dt, M = 6, genLfun.fd = 4, centrata = FALSE)
+```
+
+## Functional Principal Component Analysis (fPCA)
+
+We perform Functional PCA on the smoothed $L$-functions. Given the number of basis functions ($\text{length}(r) = 70$) and $M = 6$, the total number of basis functions is calculated as $K = 70 + 6 - 2 = 74$.
+
+```{r}
+#| label: fpca-analysis
+
+# Run fPCA
+fpca <- pca.fd(smoothed_Lfun$fd, nharm = 70, smoothed_Lfun$fdPar)
+
+# Assign sample names (excluding the 'r_values' column) to the PCA scores
+rownames(fpca$scores) <- colnames(dt)[-1]
+```
+
+## Unsupervised Clustering
+
+We apply two different clustering techniques on specific dimensions of the fPCA scores (components 1 and 60) to classify the spatial patterns into 6 distinct groups.
+
+### K-means & Hierarchical Clustering
+
+```{r}
+#| label: clustering
+
+# Set seed for reproducibility
+set.seed(123)
+
+# K-means clustering
+fpca_km <- kmeans(fpca$scores[, c(1, 60)], centers = 6)
+
+# Hierarchical clustering (Ward's method)
+fpca_hc <- hclust(dist(fpca$scores[, c(1, 60)]), method = "ward.D2")
+memb_hc <- cutree(fpca_hc, k = 6)
+```
+
+### Cluster Distribution Comparison
+
+Below are the distribution tables comparing the cluster assignments between both methods.
+
+```{r}
+#| label: cluster-tables
+
+message("K-means cluster sizes:")
+table(fpca_km$cluster)
+
+message("Hierarchical clustering cluster sizes:")
+table(memb_hc)
+```
+
+## Visualizations
+
+### Smoothed L-functions Plot
+
+We visualize the smoothed $L$-functions, color-coded by their K-means cluster assignments.
+
+Function to plot the smoothed Lcross functions
+
+```{r}
+#| label: fun-plot_smoothed_L
+plot_smoothed_Lfun <- function(smoothed_obj, clusters_vec, mark_i = "Mark 1", mark_j = "Mark 2", center_plot = TRUE) {
+  
+  # 1. Extract the distance vector (r)
+  r_vec <- smoothed_obj$r
+  
+  # 2. Evaluate the functional data object (fd) to get smoothed values
+  # This creates a matrix where rows are 'r' distances and columns are samples
+  smooth_mat <- eval.fd(r_vec, smoothed_obj$fd)
+  
+  # 3. Convert the matrix to a data.frame and prepare for ggplot
+  df_smooth <- as.data.frame(smooth_mat)
+  df_smooth$r <- r_vec
+  
+  # Pivot to long format
+  df_long <- pivot_longer(
+    df_smooth,
+    cols = -r,
+    names_to = "Slide",
+    values_to = "L_value"
+  )
+  
+  # 4. Center the L-function (L(r) - r) if requested 
+  # (Since you ran fsmooth with centrata = FALSE, we can center it visually here)
+  if (center_plot) {
+    df_long <- df_long |> mutate(L_plot_value = L_value - r)
+  } else {
+    df_long <- df_long |> mutate(L_plot_value = L_value)
+  }
+  
+  # 5. Prepare the cluster metadata from the named vector (memb_hc)
+  cluster_df <- data.frame(
+    Slide = names(clusters_vec),
+    cluster = as.factor(clusters_vec)
+  )
+  
+  # 6. Join the functional data with the cluster assignments
+  df_final <- df_long |> 
+    left_join(cluster_df, by = "Slide")
+  
+  # 7. Build the ggplot
+  p <- ggplot(df_final, aes(x = r, y = L_plot_value, group = Slide, color = cluster)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+    geom_line(alpha = 0.7, linewidth = 0.6) + 
+    theme_minimal() +
+    labs(
+      title = paste0("Smoothed L-cross Function: ", mark_i, " vs ", mark_j),
+      subtitle = ifelse(center_plot, 
+                        "Centered L-function (L(r) - r). Positive = Attraction, Negative = Repulsion", 
+                        "L-function L(r)"),
+      x = "Radius (r)",
+      y = ifelse(center_plot, "L(r) - r", "L(r)"),
+      color = "Cluster"
+    ) +
+    theme(legend.position = "right")
+  
+  return(p)
+}
+```
+
+
+```{r}
+#| label: plot-l-functions
+#| fig-width: 8
+#| fig-height: 6
+
+plot_smoothed_Lfun(
+  smoothed_obj = smoothed_Lfun, 
+  clusters_vec = fpca_km$cluster, 
+  mark_i = "neoplastic",  
+  mark_j = "stromal",
+  center_plot = TRUE      # Subtracts 'r' since centrata = FALSE in fsmooth
+)
+
+```
+
+### PC Scores Comparison
+
+Finally, we project and compare the sample distributions in the reduced PCA space using both clustering results.
+
+```{r}
+#| label: plot-pc-scores
+#| fig-width: 10
+#| fig-height: 5
+
+# Set up side-by-side plotting layout
+par(mfrow = c(1, 2))
+
+# K-means plot
+plot(fpca$scores[, 1], fpca$scores[, 2], col = fpca_km$cluster, pch = 3, main = "K-means")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+
+# Hierarchical clustering plot
+plot(fpca$scores[, 1], fpca$scores[, 2], col = memb_hc, pch = 3, main = "Ward.D2")
+abline(v = 0, lty = "dashed", col = "grey")
+abline(h = 0, lty = "dashed", col = "grey")
+
+# Reset layout
+par(mfrow = c(1, 1))
+```
