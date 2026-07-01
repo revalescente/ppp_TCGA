@@ -2,6 +2,7 @@ suppressPackageStartupMessages(library(data.table))
 suppressPackageStartupMessages(library(parallel))
 suppressPackageStartupMessages(library(fda))
 source("~/ppp_TCGA/src/plots/plot_funs.R")
+source("~/ppp_TCGA/src/utils/ppp_fun.R")
 
 # ==========================================
 # 2. Define Paths
@@ -37,7 +38,7 @@ table(memb_hc)
 # plot of the L funs
 plot_colored <- plot_smoothed_Lfun(
   smoothed_obj = smoothed_Lfun, 
-  clusters_vec = memb_hc, 
+  clusters_vec = fpca_km$cluster, 
   mark_i = "neoplastic",  # Define marks manually here for the title
   mark_j = "stromal",
   center_plot = TRUE      # Set to TRUE to subtract 'r' since centrata=FALSE in fsmooth
@@ -54,8 +55,5 @@ plot(fpca$scores[,1], fpca$scores[,2], col = memb_hc, pch = 3, main = "Ward.d2")
 abline(v = 0, lty = "dashed", col = "grey")
 abline(h = 0, lty = "dashed", col = "grey")
 par(mfrow=c(1,1))
-# ==========================================
-# 4. Save the Results
-# ==========================================
 
 cat("Done!\n")

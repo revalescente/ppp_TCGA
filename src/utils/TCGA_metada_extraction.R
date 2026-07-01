@@ -1,134 +1,77 @@
-# lista dei tipi di cancro
-# 1     ACC                                          Adrenocortical Carcinoma
-# 2    BLCA                                      Bladder Urothelial Carcinoma
-# 3    BRCA                                         Breast Invasive Carcinoma
-# 4    CESC  Cervical Squamous Cell Carcinoma And Endocervical Adenocarcinoma
-# 5    CHOL                                                Cholangiocarcinoma
-# 6    CNTL                                                          Controls
-# 7    COAD                                              Colon Adenocarcinoma
-# 8    DLBC                   Lymphoid Neoplasm Diffuse Large B-cell Lymphoma
-# 9    ESCA                                              Esophageal Carcinoma
-# 10    GBM                                           Glioblastoma Multiforme
-# 11   HNSC                             Head And Neck Squamous Cell Carcinoma
-# 12   KICH                                                Kidney Chromophobe
-# 13   KIRC                                 Kidney Renal Clear Cell Carcinoma
-# 14   KIRP                             Kidney Renal Papillary Cell Carcinoma
-# 15   LAML                                            Acute Myeloid Leukemia
-# 16    LGG                                          Brain Lower Grade Glioma
-# 17   LIHC                                    Liver Hepatocellular Carcinoma
-# 18   LUAD                                               Lung Adenocarcinoma
-# 19   LUSC                                      Lung Squamous Cell Carcinoma
-# 20   MESO                                                      Mesothelioma
-# 21     OV                                 Ovarian Serous Cystadenocarcinoma
-# 22   PAAD                                         Pancreatic Adenocarcinoma
-# 23   PCPG                                Pheochromocytoma And Paraganglioma
-# 24   PRAD                                           Prostate Adenocarcinoma
-# 25   READ                                             Rectum Adenocarcinoma
-# 26   SARC                                                           Sarcoma
-# 27   SKCM                                           Skin Cutaneous Melanoma
-# 28   STAD                                            Stomach Adenocarcinoma
-# 29   TGCT                                       Testicular Germ Cell Tumors
-# 30   THCA                                                 Thyroid Carcinoma
-# 31   THYM                                                           Thymoma
-# 32   UCEC                              Uterine Corpus Endometrial Carcinoma
-# 33    UCS                                            Uterine Carcinosarcoma
-# 34    UVM                                                    Uveal Melanoma
-library(ExperimentHub)
-library(curatedTCGAData)
-ov_meta <- curatedTCGAData(diseaseCode = "OV", assays = "RNASeqGene", version = "2.1.1", dry.run = FALSE)
+# BiocManager::install("TCGAbiolinks")
+library(TCGAbiolinks)
+library(dplyr)
+library(purrr)
+library(readr)
 
-# prendo questo sottoinsieme di colonne per adesso, per analisi preliminari
-columns_to_select <- c(
-  "patient_id",                             # patient id
-  "vital_status",                          # Survival status
-  "years_to_birth",                          # Birth date
-  "days_to_death",                         # Time variable for deceased patients
-  "days_to_last_followup",                 # Time variable for censored patients
-  "patient.age_at_initial_pathologic_diagnosis", # Age 
-  "gender",                                # Gender/Sex
-  "ethnicity",                             # Ethnicity
-  "patient.anatomic_neoplasm_subdivision" # Anatomic site 
-  # TBD adding other vars of interest
-  
+# Your target disease codes
+tcga_disease_codes <- c(
+  "ACC",  "BLCA", "BRCA", "CESC", "CHOL", "CNTL", "COAD", "DLBC", 
+  "ESCA", "GBM",  "HNSC", "KICH", "KIRC", "KIRP", "LAML", "LGG",  
+  "LIHC", "LUAD", "LUSC", "MESO", "OV",   "PAAD", "PCPG", "PRAD", 
+  "READ", "SARC", "SKCM", "STAD", "TGCT", "THCA", "THYM", "UCEC", 
+  "UCS",  "UVM"
 )
-colnames(ov_meta)[colnames(ov_meta) %in% columns_to_select]
-meta_sub <- ov_meta[, columns_to_select, drop = FALSE]
-meta_sub |> head()
 
-
-library(curatedTCGAData)
-library(MultiAssayExperiment)
-
-extract_tcga_clinical <- function(disease_codes, 
-                                  columns_to_select, 
-                                  version = "2.1.1") {
+# Function to fetch ONLY clinical data for a given disease code
+fetch_clinical_metadata <- function(disease) {
+  project_id <- paste0("TCGA-", disease)
+  message("Fetching clinical data for: ", project_id)
   
-  # Lista temporanea per salvare i data.frame di ogni tumore
-  combined_list <- list()
-  
-  for (code in disease_codes) {
-    message("---> Elaborazione del cancro: ", code)
+  # Fetch from GDC
+  tryCatch({
+    data <- GDCquery_clinic(project = project_id, type = "clinical")
     
-    # Gestione degli errori per evitare che il ciclo si blocchi se un download fallisce
-    df_clean <- tryCatch({
-      
-      # 1. Scarica l'oggetto MultiAssayExperiment minimo
-      mae <- curatedTCGAData(diseaseCode = code, 
-                             assays = "RNASeqGene", 
-                             version = version, 
-                             dry.run = FALSE)
-      
-      # 2. Estrai i colData e convertili in un data.frame classico di R
-      clinical_df <- as.data.frame(colData(mae))
-      
-      # 3. Creiamo un data.frame vuoto con le colonne desiderate (salva-errore)
-      # Se una colonna non esiste nel tumore X, verrà riempita di NA
-      sub_df <- data.frame(matrix(NA, nrow = nrow(clinical_df), ncol = length(columns_to_select)))
-      colnames(sub_df) <- columns_to_select
-      rownames(sub_df) <- rownames(clinical_df)
-      
-      # Individua quali colonne richieste sono effettivamente presenti
-      existing_cols <- intersect(columns_to_select, colnames(clinical_df))
-      
-      # Copia solo le colonne esistenti
-      if (length(existing_cols) > 0) {
-        sub_df[, existing_cols] <- clinical_df[, existing_cols, drop = FALSE]
-      }
-      
-      # 4. Aggiungi il codice del tumore come colonna di tracciamento
-      sub_df$disease_code <- code
-      
-      sub_df
-      
-    }, error = function(e) {
-      message("⚠️ Errore con il codice ", code, ": ", e$message)
-      return(NULL)
-    })
-    
-    # Se il download e l'estrazione sono andati a buon fine, salva nella lista
-    if (!is.null(df_clean)) {
-      combined_list[[code]] <- df_clean
+    # Keep track of the cancer type
+    if(nrow(data) > 0) {
+      data$disease_code <- disease 
     }
-  }
-  
-  # Unisci tutti i data.frame della lista in un unico grande dataset finale
-  if (length(combined_list) > 0) {
-    final_dataset <- do.call(rbind, combined_list)
-    return(final_dataset)
-  } else {
-    stop("Nessun dato estratto. Controlla la connessione o i codici inseriti.")
-  }
+    return(data)
+  }, error = function(e) {
+    message("Error fetching ", project_id, ": ", e$message)
+    return(NULL)
+  })
 }
 
-# Le tue colonne di interesse
-my_columns <- c(
-  "patient_id", "vital_status", "years_to_birth",
-  "days_to_death", "days_to_last_followup",
-  "patient.age_at_initial_pathologic_diagnosis", 
-  "gender", "ethnicity", "patient.anatomic_neoplasm_subdivision"
+# 1. Download and combine all clinical data into one large data frame
+all_clinical_data <- map_df(tcga_disease_codes, fetch_clinical_metadata)
+
+# 2. Map your columns to the modern GDC standard names
+columns_filtered <- c(
+  "submitter_id",               # equivalent to "patient_id"
+  "disease_code",               # added by us to track cancer type
+  "vital_status",               # "vital_status"
+  "year_of_birth",              # proxy for "years_to_birth"
+  "days_to_death",              # "days_to_death"
+  "days_to_last_follow_up",     # "days_to_last_followup"
+  "age_at_diagnosis",           # "patient.age_at_initial_pathologic_diagnosis" (Note: GDC returns this in days)
+  "gender",                     # "gender"
+  "ethnicity",                  # "ethnicity"
+  "tissue_or_organ_of_origin",   # "patient.anatomic_neoplasm_subdivision"
+  "race",                   # Essential demographic pairing with ethnicity
+  "ajcc_pathologic_stage",  # Tumor stage
+  "tumor_stage",            # Sometimes stage is recorded here instead depending on the cancer
+  "primary_diagnosis",      # Histological subtype
+  "prior_malignancy",        # Useful for filtering out confounding previous cancers  
+  "tissue_source_site" 
 )
 
-# Estrazione singola
-ov_clinical_only <- extract_tcga_clinical(disease_codes = "OV", columns_to_select = my_columns)
+# 3. Filter the dataframe to only keep the columns of interest 
+# (intersect ensures we don't crash if a column happens to be missing)
+existing_cols <- intersect(columns_filtered, colnames(all_clinical_data))
+final_metadata <- all_clinical_data %>% 
+  select(all_of(existing_cols)) %>%
+  # 3. Create a reliable 'hospital_code' column directly from the ID
+  # The code is always the 6th and 7th character in "TCGA-XX-YYYY"
+  mutate(hospital_code = substr(submitter_id, 6, 7))
 
-head(ov_clinical_only)
+# View the result
+colnames(final_metadata)
+head(final_metadata)
+# View the result
+head(final_metadata)
+
+# Save the data
+write_csv(all_clinical_data, "/projects/shared/TCGA_data/TCGA_full_metadata_VR.csv")
+write_csv(final_metadata, "/projects/shared/TCGA_data/TCGA_filtered_metadata_VR.csv")
+colnames()
