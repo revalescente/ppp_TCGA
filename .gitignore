@@ -5,6 +5,8 @@
 .positai
 .Rproj
 .rds
+*.Rproj
+*.rds
 
 logs/
 outputs/
