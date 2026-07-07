@@ -1,0 +1,31 @@
+Package: quarto
+Title: Spatial Point Pattern Analysis with FDA
+Version: 0.1
+Authors@R: 
+    person("Valerio", "Reffo", , "valerio.reffo@gmail.com", role = c("aut", "cre"),
+           comment = c(ORCID = "0000-0000-0000-0000"))
+Description: Function to analyse TCGA dataset.
+License: GPL (>= 3)
+Imports: 
+    anndataR,
+    dplyr,
+    fda,
+    ggplot2,
+    parallel,
+    spatstat.explore,
+    spatstat.geom,
+    tidyr,
+    utils
+Suggests: 
+    data.table,
+    imager,
+    knitr,
+    rhdf5,
+    rmarkdown,
+    spatstat
+VignetteBuilder: 
+    knitr
+Config/fusen/version: 0.7.2
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 8.0.0

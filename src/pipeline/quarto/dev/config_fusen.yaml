@@ -1,0 +1,34 @@
+flat_fda_pipeline.qmd:
+  path: dev/flat_fda_pipeline.qmd
+  state: active
+  R:
+  - R/fsmooth.R
+  - R/plot_smoothed_lfun.R
+  tests: []
+  vignettes: vignettes/dev-fda_pipeline.Rmd
+  inflate:
+    flat_file: dev/flat_fda_pipeline.qmd
+    vignette_name: dev-fda_pipeline
+    open_vignette: true
+    check: true
+    document: true
+    overwrite: 'yes'
+    clean: ask
+    codecov: false
+flat_Lcross_pipeline.qmd:
+  path: dev/flat_Lcross_pipeline.qmd
+  state: active
+  R:
+  - R/ann2ppp.R
+  - R/downsample_kde.R
+  tests: []
+  vignettes: vignettes/dev-lcross_pipeline.Rmd
+  inflate:
+    flat_file: dev/flat_Lcross_pipeline.qmd
+    vignette_name: dev-Lcross_pipeline
+    open_vignette: true
+    check: true
+    document: true
+    overwrite: 'yes'
+    clean: ask
+    codecov: false

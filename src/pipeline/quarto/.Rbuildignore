@@ -1,0 +1,8 @@
+^dev$
+^LICENSE\.md$
+^quarto\.Rproj$
+^\.Rproj\.user$
+^\.positai$
+^\.claude$
+^renv$
+^renv\.lock$

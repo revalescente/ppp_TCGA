@@ -1,0 +1,260 @@
+---
+title: "Conversion of TCGA from adatas to Lcross functions"
+author: "Valerio Reffo"
+format: html
+date: "`r Sys.Date()`"
+---
+
+```{r}
+#| label: development
+#| include: FALSE
+
+library(testthat)
+```
+
+
+## Setup and Libraries
+
+```{r}
+#| label: setup
+#| message: false
+#| warning: false
+
+library(spatstat)
+library(imager)
+library(anndataR)
+library(parallel)
+library(spatstat)
+library(rhdf5)
+```
+
+I'm going to read all the sample adatas and the masks and add them togheter to create point process objects, then I'll reduce the dimensionality of the pp objects so I can estimate the Lcross function between two cell types of interest, by now they are Neoplastic and Stromal cells.
+
+## Path Configuration
+
+Dynamically configure paths for input, output, and masks based on document parameters.
+
+```{r}
+#| label: paths-handling
+
+# Directories
+sample_dir <-  "/projects/shared/TCGA_data/h5ad/TCGA-TS-A7P8-01Z-00-DX1.25E9AFA9-6C12-4F18-BE79-2F4F19887ECD.h5ad.gz"
+save_dir <-  "/projects/shared/TCGA_data/results/test"
+
+# Generate the save path
+file_name <- sub("\\.h5ad\\.gz$", ".rds", basename(sample_dir))
+save_path <- file.path(save_dir, file_name)
+
+# Configure path for the mask (.png)
+mask_path <- sub("/h5ad/", "/mask/", sample_dir)
+mask_path <- sub("\\.h5ad\\.gz$", ".png", mask_path)
+```
+
+## Data Loading and PPP Conversion
+
+Load the mask image and convert the spatial annotation file into a Point Pattern (`ppp`) object compatible with `spatstat`.
+
+The function need the h5ad file path, the mask as an image and combine them together based on magnification level, 
+it's needed to specify the column of the h5ad with the cell type information, and the name of the spatial coordinate, by default named "x" and "y". 
+
+```{r}
+#| label: function-ann2ppp
+#' ann2ppp Read a h5ad file and convert it to a point process object from spatstat library
+#' 
+#' @param data_path path to the h5ad file
+#' @param mask Optional: img object to be converted in the window of the point process class object
+#' @param magnif level of magnification of the original H&E image, can be 20x or 40x
+#' @param spat_coords_name names of coordinate of the centroids in the h5ad file
+#' @param marks_col name of the .obs vector with the names of the marks (usually the cell types names)
+#' @importFrom anndataR read_h5ad
+#' @importFrom spatstat.geom owin affine ppp
+#' @return An object of class "ppp"
+#' @export
+ann2ppp <- function(data_path, mask = NULL, magnif, spat_coords_name = c("x", "y"), marks_col = "type") {
+  
+  # magnif is the value of the magnification parameter in the metadata (can be 20 or 40 (20x or 40x respectively)) 
+  # it's probably an error if it's noted as 20x.
+  
+  # 1. Read AnnData
+  ann <- read_h5ad(data_path)
+  
+  # 2. Extract spatial coordinates
+  spat <- ann$obsm$spatial
+  x_coords <- spat[, 1]
+  y_coords <- spat[, 2]
+  
+  # 3. Extract marks (e.g., cell types)
+  marks_data <- NULL
+  if (marks_col %in% colnames(ann$obs)) {
+    marks_data <- as.factor(ann$obs[[marks_col]])
+  }
+  
+  # 4. Define the window (owin)
+  if (!is.null(mask)) {
+    # Extract the 2D matrix from the imager cimg object (dropping z and c dimensions).
+    # imager keeps 'x' as rows and 'y' as columns, but spatstat's owin mask 
+    # expects 'y' as rows and 'x' as columns, so we transpose it.
+    # We also convert it to a logical matrix (TRUE for foreground > 0)
+    mask_mat <- t(mask[, , 1, 1] > 0.5) 
+
+    # Create an owin using the image mask and the ranges of the spatial coordinates
+    win_thumb <- owin(
+      xrange = c(0, dim(mask)[1]), 
+      yrange = c(0, dim(mask)[2]), 
+      mask = mask_mat
+    )
+    # C. Calculate exact scale
+    exact_scale <- magnif / 1.25
+    
+    # D. Transform the window in the full resolution scale of the coordinates
+    final_win <- affine(win_thumb, mat = diag(c(exact_scale, exact_scale)))
+    
+  } else {
+    # Create a basic bounding box window if no mask is provided
+    final_win <- owin(
+      xrange = range(x_coords, na.rm = TRUE), 
+      yrange = range(y_coords, na.rm = TRUE)
+    )
+  }
+  
+  # 5. Build the PPP object
+  p <- ppp(
+    x = x_coords, 
+    y = y_coords, 
+    window = final_win,
+    marks = marks_data
+  )
+  
+  return(p)
+}
+
+```
+
+Read the mask as an image
+
+```{r}
+#| label: mask-import
+
+img <- imager::load.image(mask_path)
+```
+
+Create the point process object
+
+```{r}
+AppMag <-  40
+
+pp_object <- ann2ppp(sample_dir, mask = img, magnif = AppMag)
+```
+
+## Downsampling (KDE)
+
+To prevent memory overflow, we apply a Kernel Density Estimation (KDE) based downsampling before computing the `Lcross` function between Neoplastic and Stromal cells.
+
+Function to downsample based on the Kernel Density Estimation, it needs a pp objects, the marks name which is a vector of dim 2 and a target number of point to which downsample. It's possible to personalized the density.ppp function
+
+```{r}
+#| label: function-downsample_KDE
+#' downsample_KDE Function to downsample based on the Kernel Density Estimation.
+#' 
+#' It needs a pp objects, the marks name which is a vector of dim 2 and a target number of point to which downsample. 
+#' It's possible to personalized the density.ppp function
+#' 
+#' @param ppp_obj object of class "ppp" from spatstat
+#' @param marks_name vector of dim 2 with the names of the cell types to apply the function to
+#' @param n_target number of point in the ppp object to downsample
+#' @param ... additional specification for the density.ppp function
+#' @importFrom parallel mclapply detectCores
+#' @importFrom spatstat.geom marks split.ppp npoints lookup.im coords superimpose marks<-
+#' @importFrom spatstat.explore density.ppp bw.ppl
+#' @return An object of class "ppp" with n_target points for each marks_name
+#' @export
+downsample_KDE <- function(ppp_obj, marks_name, n_target, ...) {
+  
+  # 1. Subset to the specified marks
+  pp_neo <- subset(ppp_obj, marks %in% marks_name)
+  marks(pp_neo) <- factor(marks(pp_neo))
+  
+  # 2. Split into a named list based on the marks
+  pp_split <- split.ppp(pp_neo)
+  
+  # 3. Process each split in parallel
+  sampled_list <- mclapply(pp_split, function(pp) {
+    
+    n_available <- npoints(pp)
+    
+    # Safely handle empty patterns
+    if (n_available == 0) return(pp[integer(0)])
+    
+    # Skip KDE if we don't have enough points to downsample
+    if (n_available <= n_target) return(pp)
+    
+    # Calculate KDE safely with error handling for bandwidth selection
+    kern <- tryCatch({
+      density.ppp(pp, at="pixels", ...)
+    }, error = function(e) {
+      # Fallback: if auto-bandwidth fails, try a simple rule or fixed sigma
+      # Adjust or expose this fallback based on your data scale
+      density.ppp(pp, at="pixels", sigma = bw.ppl(pp))
+    })
+    
+    xy <- coords(pp)
+    pint <- lookup.im(kern, xy$x, xy$y)
+    
+    good <- which(is.finite(pint) & !is.na(pint) & pint > 0)
+    if (length(good) == 0) return(pp[integer(0)])
+    if (length(good) <= n_target) return(pp[good])
+    
+    w <- 1 / pint[good]
+    w <- w / sum(w)
+    
+    # Defensive programming: use a robust sampling wrapper to avoid the sample(x) gotcha
+    sampled_idx <- if (length(good) == 1) good else sample(good, n_target, replace = FALSE, prob = w)
+    
+    return(pp[sampled_idx])
+    
+  }, mc.cores = min(length(pp_split), detectCores()))
+  
+  # 4. Recombine using the explicit geometry package namespace
+  pp_final <- do.call(superimpose, sampled_list)
+  
+  return(pp_final)
+}
+```
+
+Creation of the subsetted pp object
+
+```{r}
+#| label: pp-subsetting
+
+# Define the distance vector
+r_values <- seq(0, 150, length.out = 70)
+
+# Reproducibility for downsampling
+set.seed(10)
+ppp_sub <- downsample_KDE(pp_object, c("neoplastic", "stromal"), 40000)
+```
+
+Estimating the Lcross function between the two cell types with the subsetted pp object
+
+```{r}
+# Compute Lcross function
+Lcross_neoStroma <- Lcross(
+  ppp_sub, 
+  i = "neoplastic", 
+  j = "stromal", 
+  r = r_values,
+  correction = "border"
+)
+```
+
+## Saving Results
+
+Export the resulting analysis object into a serialized `.rds` format.
+
+```{r}
+#| label: save-output
+#| eval: FALSE
+
+saveRDS(Lcross_neoStroma, file = save_path)
+```
+
