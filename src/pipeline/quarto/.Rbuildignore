@@ -6,3 +6,7 @@
 ^\.claude$
 ^renv$
 ^renv\.lock$
+^_pkgdown\.yml$
+^docs$
+^pkgdown$
+^\.github$
