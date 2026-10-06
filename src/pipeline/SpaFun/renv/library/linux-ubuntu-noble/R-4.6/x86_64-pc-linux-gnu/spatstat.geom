@@ -1,0 +1,1 @@
+/home/vreffo/.cache/R/renv/cache/v5/linux-ubuntu-noble/R-4.6/x86_64-pc-linux-gnu/spatstat.geom/3.8-1/43b011643ad9b1d8c0f5edc0b7977719/spatstat.geom
